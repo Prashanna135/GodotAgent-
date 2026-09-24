@@ -1,289 +1,222 @@
 # GodotAgent
 
-An AI coding agent for Godot 4, built entirely in Godot itself. It reads,
-writes, and searches your project's files, runs checks and headless
-scenarios to verify its work, and talks to any OpenAI-compatible LLM
-endpoint — cloud APIs, local Ollama models, or the included DeepSeek Web
-Bridge.
+An AI coding agent that lives in Godot, for working on Godot projects.
+It reads and edits your scripts, runs checks and headless tests to
+confirm its own work, and talks to whatever LLM you point it at —
+OpenAI, Gemini, Groq, a local Ollama model, or DeepSeek's web chat via
+the included bridge.
 
-The whole UI is built in GDScript. There is no editor plugin to install,
-no addon folder to copy. You clone the repo, open it as a Godot project,
-and start a task.
+Everything's built in GDScript. No editor plugin, no addon folder, no
+`.tscn` editing. Clone it, open it as a project, run it.
 
----
+## What you need
 
-## Requirements
+- Godot 4.7 or newer. Earlier 4.x probably works but I haven't tried.
+- Access to an LLM. Cloud API, local server, or the DeepSeek bridge.
+- Python 3.10+ if you want to use the DeepSeek bridge. Skip it otherwise.
 
-- **Godot 4.7 or newer.** Earlier 4.x versions may work but aren't tested.
-- **An LLM endpoint.** Either a cloud API (OpenAI, Gemini, Groq,
-  OpenRouter), a local server (Ollama, LM Studio), or the bundled
-  DeepSeek Web Bridge (see below).
-- **Python 3.10+** — only if you want to use the DeepSeek Web Bridge.
-  Native API providers don't need it.
+## Getting it running
 
----
+```bash
+git clone https://github.com/Prashanna135/GodotAgent-.git
+```
 
-## Installation
+Open the folder in Godot, hit F5. You'll get an empty chat window. Click
+Settings in the top bar, pick your provider, drop in your API key, and
+you're set. For local models just point it at the Ollama or LM Studio
+URL — those don't need a key.
 
-1. Clone the repo and open the folder in Godot:
+## Settings, briefly
 
-   git clone https://github.com/Prashanna135/GodotAgent-.git
+**Provider** — preset list, or Custom if yours isn't there. Endpoint and
+model go in as plain text.
 
-   Then **File → Open Project** in Godot and select the folder.
+**Model tier** — this one matters more than it looks. Pick Auto and the
+harness guesses based on the model name: tiny local models get extra
+nudges and smaller tool output caps, cloud models get none of that
+because it's wasted tokens on something that already reads context
+properly. If Auto gets it wrong, set it manually.
 
-2. Press F5 to run. The first launch shows a chat window with no project
-   loaded. That's expected.
+**Timeout** — 120 seconds is fine for cloud APIs. The DeepSeek bridge
+needs 600 or more because each round trip is a real browser interaction.
 
-3. Click **Settings** in the top bar and configure your provider.
+**Tools** — you can disable tools you don't use. Every tool's schema
+gets sent on every request, so turning off the ones you'll never call
+makes things cheaper. launch_editor, launch_project, write_plan, and
+update_plan are the usual ones to drop.
 
----
+## Using it
 
-## Configuration
+Open a project with File → Open Project. The agent gets access to that
+folder and only that folder — everything goes through a path sandbox
+that won't let it escape.
 
-The Settings dialog has four sections.
+Then just describe what you want:
 
-**Model provider** — pick from the preset list, or choose *Custom* and
-enter the endpoint URL directly.
+- "read scripts/player.gd and fix the null reference on line 42"
+- "add a health system to the enemy base class"
+- "the project won't boot headlessly, figure out why"
 
-| Provider | Endpoint | Notes |
-|---|---|---|
-| Google AI Studio | `generativelanguage.googleapis.com/v1beta/openai/…` | Free tier available |
-| OpenAI | `api.openai.com/v1/chat/completions` | Paid |
-| Groq | `api.groq.com/openai/v1/chat/completions` | Generous free tier |
-| OpenRouter | `openrouter.ai/api/v1/chat/completions` | Free-tier options |
-| Ollama (local) | `localhost:11434/v1/chat/completions` | Requires Ollama running |
-| LM Studio (local) | `localhost:1234/v1/chat/completions` | Requires LM Studio running |
-| DeepSeek Web Bridge | `127.0.0.1:5000/v1/chat/completions` | See bridge section below |
+It'll start calling tools. You can watch each call and its result in
+the chat. If it wants to do something destructive — delete a file, run
+a shell command — you get a dialog and can say no.
 
-Fill in your **API key** (leave blank for local servers). Set the
-**Model** name exactly as the provider spells it.
+Changes are reversible. Hit History in the top bar and you'll see every
+file it touched with a diff and a Revert button.
 
-**Model tier** controls how much the harness helps the model. Pick *Auto*
-and it'll guess from the model name — a small local model gets
-hand-holding and small caps, a cloud model gets none of it. Override it
-if the guess is wrong.
+## The tools
 
-**Timeout** is how long to wait for the LLM's response. The default of
-120 seconds is fine for cloud APIs. Set it higher (600+) if you're using
-the DeepSeek Web Bridge, because each round trip there is a real browser
-interaction.
+This is the actual reason to use this thing over pasting code into a
+chat window. All of these run inside your project with no copy-pasting.
 
-**Tools** lets you turn optional tools off to save tokens. Every tool's
-schema is sent on every API call, so disabling ones you don't use makes
-requests cheaper. `launch_editor`, `launch_project`, `write_plan`, and
-`update_plan` are good candidates if you don't use them.
+### Reading
 
----
-
-## Using the agent
-
-1. **Open a project.** File → Open Project, pick a Godot project folder
-   on disk. The agent now has access to that folder only — everything it
-   reads and writes goes through a sandbox that can't escape the folder
-   you selected.
-
-2. **Type a task.** Describe what you want in plain English. Examples:
-
-   - "Read scripts/player.gd and fix the null reference on line 42."
-   - "Add a health system to the enemy base class."
-   - "Why is my project failing to boot headlessly? Run a check and tell me."
-
-   Press Enter. The agent will start calling tools.
-
-3. **Watch it work.** Tool calls and their results appear in the chat.
-   The Activity panel shows the raw log. The status bar shows what phase
-   the agent is in.
-
-4. **Approve if asked.** Some tools (deleting files, running terminal
-   commands) require your approval. A dialog appears; click Allow or Deny.
-
-5. **Review changes.** The **History** button in the top bar opens a diff
-   view of every file the agent modified. Each entry has a Revert button.
-
----
-
-## Tools
-
-The agent's power comes from its tools. Every task is the model choosing
-which of these to call, in what order, based on what it needs. All file
-operations are sandboxed to the project folder you opened.
-
-### Reading and searching
-
-| Tool | What it does |
-|---|---|
-| `read_file` | Read a UTF-8 text file. Large files require a line range instead of dumping the whole thing. |
-| `read_files` | Read several files in one call. Cheaper than N separate `read_file` calls on the web-chat tier, where each round trip is a browser wait. |
-| `list_directory` | List a folder's immediate contents. |
-| `search_text` | Substring search across the project. Skips generated files and binary assets automatically. |
-| `find_files` | Find files by name — globs (`*.tscn`) or substrings. Code sorts before assets. |
-| `find_symbol` | Find declarations of a function, class, signal, variable, constant, or enum across the project. Also reports autoloads from `project.godot`. |
-| `find_references` | Find every place a symbol is used — call sites, reads, signal connections. Catches string-literal references like `connect("died", ...)`. |
+- **read_file** — read a text file. Big files need a line range or you
+  get refused.
+- **read_files** — several files in one call. Worth using on the DeepSeek
+  bridge where each call is a 30-second browser wait.
+- **list_directory** — folder contents.
+- **search_text** — find a substring. Skips .godot/, imports, binaries.
+- **find_files** — find by filename, globs or partial names.
+- **find_symbol** — where's a function/class/signal/variable declared.
+  Also picks up autoloads, which find_symbol would otherwise miss
+  because they live in project.godot instead of a .gd file.
+- **find_references** — everywhere a symbol is used. Catches the
+  connect("died", ...) string-literal cases that a naive rename breaks.
 
 ### Editing
 
-| Tool | What it does |
-|---|---|
-| `edit_file` | Replace an exact block of text. Fails if the block appears more than once, so the model has to add enough context to be unambiguous. |
-| `edit_file_lines` | Replace a range of lines by number. Use when you have a line number from a check but not the exact current text. |
-| `write_file` | Overwrite a whole file. Refuses to replace a ≥1 KB file with <20% of its size, so a partial write can't destroy the original. |
-| `create_file` | Create a new file. Fails if it already exists — use `write_file` for overwriting. |
-| `delete_file` | Delete a single file. Requires user approval. |
-| `revert_last_change` | Undo the most recent write, create, edit, or delete. Call again to step further back. |
+- **edit_file** — replace a chunk of text. Refuses if the chunk appears
+  more than once, which forces the model to add enough context to be
+  unambiguous.
+- **edit_file_lines** — replace by line number. Handy when you have a
+  line from an error message but don't know the exact current text.
+- **write_file** — overwrite the whole thing. Won't let you replace a
+  1KB+ file with a tiny stub, which is a mistake small models make
+  constantly.
+- **create_file** — new file. Errors if it exists.
+- **delete_file** — needs your approval.
+- **revert_last_change** — undo the last write/edit/delete. Call it
+  again to step back further.
 
 ### Running Godot
 
-| Tool | What it does |
-|---|---|
-| `check_script` | Syntax-check one `.gd` file. Fast. Runs automatically after every edit on a `.gd`. |
-| `check_project` | Syntax-check every `.gd` file in the project. Slower — one subprocess per file — but catches scripts reachable only at runtime. |
-| `launch_headless` | Run the project headlessly and capture stdout/stderr. Catches errors that only surface when scripts actually load. |
-| `run_scenario` | **Behavioral verification.** Write a small GDScript scenario, run it headlessly against the real project, get a PASS/FAIL verdict. This is how the agent tests movement, collisions, damage, timers — anything that works at runtime but not at parse time. |
-| `launch_editor` | Launch the Godot editor on the project. Returns immediately. |
-| `launch_project` | Run the project windowed. Returns immediately. |
+- **check_script** — parse one .gd. Fast. Runs automatically after edits.
+- **check_project** — parse every .gd. Slower but catches scripts that
+  only load at runtime.
+- **launch_headless** — boot the project and capture output. Catches
+  things that pass a parse check but blow up when scripts actually run.
+- **run_scenario** — write a GDScript test, run it against the real
+  project, get pass/fail. This is how you verify that a movement fix
+  actually moves the unit instead of just compiling.
+- **launch_editor** / **launch_project** — open the editor or run the
+  game. Fire and forget.
 
-### Scene and asset inspection
+### Scenes
 
-| Tool | What it does |
-|---|---|
-| `inspect_scene` | Parse a `.tscn` and return the node tree — names, types, attached scripts, ext_resources — instead of raw resource syntax. |
-| `find_node` | Locate a node inside a scene by name or type. |
-| `get_node_property` | Read one property of a node as defined in the scene file. |
-| `find_scene_users` | Every other scene or script that preloads or instances a given scene. Answers "what uses this?" |
+- **inspect_scene** — parse a .tscn and show the node tree. Way easier
+  to reason about than 40 lines of ext_resource syntax.
+- **find_node** — find a node by name or type in a scene.
+- **get_node_property** — read a property as set in the scene file.
+- **find_scene_users** — what else references this scene.
 
 ### Project analysis
 
-| Tool | What it does |
-|---|---|
-| `list_autoloads` | Every autoload singleton declared in `project.godot`. Useful because autoloads aren't `.gd` declarations, so `find_symbol` won't find them. |
-| `find_rpc_calls` | Every `@rpc`-annotated function and every `rpc()`/`rpc_id()` call site, grouped by method name. Built for multiplayer bugs where host and client disagree about who called what. |
-| `find_signal_wiring` | Every `.connect(...)` and `.emit()` / `emit_signal(...)` for a signal, plus its declaration. `find_references` on a signal, essentially. |
+- **list_autoloads** — every autoload from project.godot.
+- **find_rpc_calls** — every @rpc function and every rpc()/rpc_id()
+  call, grouped by method. Built for the multiplayer bug where the
+  host calls rpc_id(1, ...) on itself.
+- **find_signal_wiring** — every .connect() and .emit() for a signal,
+  plus where it's declared.
 
-### Godot API lookup
+### API lookup
 
-| Tool | What it does |
-|---|---|
-| `godot_api_lookup` | Look up a Godot class's methods, signals, properties, constants, and enums from the engine's own class reference. Pass `member="..."` to check one name — it suggests near-misses when the name doesn't exist. Catches hallucinated API calls before they're written. |
+- **godot_api_lookup** — check what methods/signals/properties a Godot
+  class actually has, straight from the engine's own class reference.
+  Pass member="..." to check one name and get near-miss suggestions
+  when you typed the wrong thing. Prevents the class of bug where the
+  model confidently writes `AnimationTree.get_root_motion_position()`
+  and it doesn't exist.
 
-### Task planning
+### Planning
 
-| Tool | What it does |
-|---|---|
-| `write_plan` | Set a multi-step plan for a task. The plan shows in the UI as the agent works through it. |
-| `update_plan` | Mark one plan step in progress, done, or blocked. |
+- **write_plan** / **update_plan** — for multi-step tasks. Shows up in
+  the UI so you can see where it is.
 
-### Tool registration
+Tools marked in Settings as optional (everything except the file read
+and edit tools) can be turned off. check_script, check_project,
+launch_headless, run_scenario, and godot_api_lookup all need the Godot
+executable path set in Settings → Godot.
 
-Every tool's schema costs tokens on every API call, so tools you don't
-use can be turned off in **Settings → Tools**. Good candidates for
-disabling: `launch_editor`, `launch_project`, `write_plan`, `update_plan`.
-The rest are enabled by default.
+## DeepSeek bridge (optional)
 
-`check_script`, `check_project`, `launch_headless`, `run_scenario`, and
-`godot_api_lookup` need the Godot executable path configured in
-**Settings → Godot**.
-
----
-
-## Optional: DeepSeek Web Bridge
-
-The bridge lets you use DeepSeek's free web chat as if it were an
-OpenAI-compatible API. It works by driving a real Chromium browser to
-chat.deepseek.com with Playwright, since that endpoint has no native
-function-calling and no API.
+DeepSeek's web chat doesn't have an API. This bridge drives a real
+browser to chat.deepseek.com and pretends it's an OpenAI endpoint, so
+GodotAgent can use it without any changes.
 
 Setup:
 
-1. Install Python 3.10 or newer.
+```bash
+cd bridge
+python -m venv venv
+source venv/Scripts/activate  # or venv/bin/activate on mac/linux
+pip install -r Requirements.txt
+playwright install chromium
+python bridge.py
+```
 
-2. From the `bridge/` folder in the repo:
+A Chromium window opens. Log into DeepSeek. Leave it open. Then in
+GodotAgent's settings, pick the DeepSeek Web Bridge preset and set your
+timeout to 600+.
 
-   python -m venv venv
-   source venv/Scripts/activate     # Windows (Git Bash)
-   source venv/bin/activate         # macOS / Linux
-   pip install -r Requirements.txt
-   playwright install chromium
+The bridge writes every request to `bridge_logs/`. If something goes
+wrong, index.jsonl is where to look.
 
-3. Run the bridge:
+Honestly: this thing is slow. Each tool call is a real browser round
+trip, so 30-90 seconds per call instead of the two seconds a native
+API takes. Use it if you don't have an API key and want to try the
+agent out. Native providers are better in every way that matters.
 
-   python bridge.py
+If DeepSeek login through Google gives you trouble ("this browser or
+app may not be secure"), that's Google blocking automated browsers. The
+bridge can reuse your real Chrome profile instead. The two env vars
+that control this are documented at the top of bridge.py.
 
-   A Chromium window opens on first run. Log in to DeepSeek in that
-   window. Leave it open — the bridge holds the session.
+## Setting the Godot path
 
-4. In GodotAgent's Settings, choose the **DeepSeek Web Bridge** provider
-   preset. Set the timeout to 600 or higher.
+check_script, check_project, launch_headless, run_scenario, and
+godot_api_lookup all spawn Godot as a subprocess. Point the agent at
+your Godot binary in Settings → Godot → Executable. If Godot's on your
+system PATH, leave it blank and it'll find it.
 
-5. Point the agent at a project and start a task.
+## When things go wrong
 
-The bridge logs every request to `bridge/bridge_logs/`. If something
-goes wrong, that's the first place to look — `index.jsonl` has one line
-per request with size, duration, and status.
+**"No project is open"** — open a project first. File → Open Project.
 
-**Note:** the bridge is more fragile and much slower than a native API.
-Each tool call is a real browser round trip (30-90 seconds). Use it when
-you don't have an API key and want to try the agent out, not as a
-permanent setup. Native providers are faster, cheaper, and more reliable.
+**Tool call shows in the chat but nothing happened** — likely a tool
+that isn't registered. Check the Activity panel; the log shows every
+attempt and its result.
 
-**If DeepSeek login via Google fails:** Google blocks OAuth sign-in from
-automated browsers. The bridge supports reusing your real Chrome profile
-instead — see the config comments at the top of `bridge.py` for the two
-environment variables that control this (`DEEPSEEK_BROWSER_CHANNEL` and
-`DEEPSEEK_PROFILE_DIR`).
+**Requests keep timing out** — raise the timeout. Local models are slow
+and the DeepSeek bridge is slower.
 
----
+**A file the agent edited disappeared** — checkpoints are separate from
+git, stored in user://checkpoints/. Use History → Revert.
 
-## Optional: Godot executable path
+**The agent stops without doing anything** — some tasks are too vague
+or too big. Break them up. The status bar shows GAVE_UP or BLOCKED when
+this happens, so at least you know it's not silently pretending to be
+done.
 
-Some tools (`check_script`, `check_project`, `launch_headless`,
-`run_scenario`, `godot_api_lookup`) need to spawn Godot as a subprocess.
-Point the agent at your Godot binary in **Settings → Godot → Executable**.
-If it's on your system PATH, you can leave it blank and Godot will be
-found automatically.
+## If you're reading the source
 
----
-
-## Troubleshooting
-
-**"No project is open" when I send a message.** Use File → Open Project
-first. The agent can't do anything without a project folder.
-
-**The agent writes a tool call but nothing happens.** It may be trying to
-call a tool that isn't registered. Check the Activity panel — the log
-shows every tool call attempt with its result.
-
-**Requests time out.** Raise the timeout in Settings. Local models can
-take a while to respond; the DeepSeek Web Bridge is slow by design.
-
-**A file the agent created disappeared.** Checkpoints are saved to
-user://checkpoints/, separate from your project. Use the Revert button in
-the History panel to restore a previous state.
-
-**The agent gave up without changing anything.** Some tasks are genuinely
-too vague or too large for the model. Try breaking them into smaller
-steps. The status bar shows GAVE_UP or BLOCKED instead of COMPLETED when
-this happens.
-
----
-
-## Design notes
-
-A few things that may be non-obvious if you're reading the source:
-
-- **The LLM is stateless per request.** Every request sends the whole
-  conversation. There's no server-side session on the provider's side.
-
-- **Tools are sandboxed.** ProjectPathTool.resolve_path() prevents any
-  file operation from escaping the project folder you opened.
-
-- **Settings persist to user://agent_settings.cfg**, which is outside
-  the repo. Your API key never enters git.
-
-- **The checkpoint system is separate from git.** It has its own stash
-  directory under user://checkpoints/ and doesn't touch .git/.
-
----
+- Every request sends the whole conversation. No server-side session.
+- ProjectPathTool.resolve_path() is the sandbox. Nothing escapes the
+  folder you opened.
+- Settings live in user://agent_settings.cfg. API keys never enter the
+  repo.
+- Checkpoints are their own stash directory, separate from git.
 
 ## License
 
-MIT. See LICENSE for the full text.
+MIT. See LICENSE.
