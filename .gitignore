@@ -5,3 +5,6 @@ export_presets.cfg
 *.tmp
 *~
 .agent_scenarios/
+bridge/bridge_logs/
+bridge/venv/
+bridge/__pycache__/
