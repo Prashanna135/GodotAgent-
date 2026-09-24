@@ -1,0 +1,468 @@
+GodotAgent — project structure & status
+
+Engine: Godot 4.7.2
+Language: GDScript, tabs for indentation
+UI: built entirely in code, no .tscn editing except main.tscn's root node
+
+=======================================================================
+FILE TREE
+=======================================================================
+
+GodotAgent/
+├── project.godot
+├── main.tscn                     # root Control → UI/MainWindow.gd
+├── main.gd                       # OLD, unreferenced, safe to delete
+│
+├── Agent/
+│   ├── AgentState.gd             # state enum + change signal
+│   ├── Conversation.gd           # message list, to_array() for the API
+│   └── AgentLoop.gd              # main model/tool cycle, repeat/thrash
+│                                  #   detection, cancel-safe (_running guards),
+│                                  #   INVALID_ARGUMENT retry nudge,
+│                                  #   post-check-error nudge (flag not reset
+│                                  #   on read-only calls), diagnostic-task
+│                                  #   priming hint, wrong-line detection note,
+│                                  #   conditional read-only repeat guard,
+│                                  #   STATE_CHANGE_TOOL_NAMES (revert counts
+│                                  #   as a write), PATH_DEFAULT_RES_TOOLS
+│                                  #   normalization, FFFD cleaning in truncate,
+│                                  #   edit-range tracking for auto-verify,
+│                                  #   file-not-found inline file listing,
+│                                  #   symbol-guess spiral nudge,
+│                                  #   no-read progress nudge,
+│                                  #   2-stage gave-up escalation
+│
+├── LLM/
+│   ├── LLMResponse.gd            # normalized { text, tool_calls, stop_reason, usage }
+│   ├── LLMProvider.gd            # abstract base (unused — see §Decisions)
+│   └── LLMClient.gd              # OpenAI-compatible HTTP client:
+│                                  #   - configurable/unlimited request_timeout
+│                                  #   - cancel_pending()
+│                                  #   - 429 retry w/ backoff + Retry-After
+│                                  #   - daily-quota fast-fail
+│                                  #   - Gemini 3.x thought_signature round-trip
+│                                  #   - (see §KNOWN LIMITATIONS: transport error
+│                                  #     messages still numeric — fix drafted)
+│
+├── Tools/
+│   ├── Tool.gd                   # base class
+│   ├── ToolResult.gd             # ok()/failure() + typed ErrorKind
+│   ├── ToolManager.gd            # registry, permission gate, checkpoint hook
+│   ├── ProjectPathTool.gd        # sandboxed res:// → absolute path resolution;
+│   │                              #   detect_indent_char() + normalize_indent()
+│   ├── GodotTool.gd              # base for tools that spawn Godot; owns
+│   │                              #   autoload-aware false-positive filtering
+│   │                              #   AND syntax_hints_for_events()
+│   │
+│   ├── ReadFileTool.gd           # read_file (line-range, large-file gate)
+│   ├── WriteFileTool.gd          # write_file + catastrophic-shrink guard
+│   │                              #   (refuses to replace ≥1KB file with
+│   │                              #   <20% of its size)
+│   ├── CreateFileTool.gd         # create_file (fails if exists)
+│   ├── EditFileTool.gd           # edit_file + indent normalization
+│   ├── EditFileLinesTool.gd      # edit_file_lines + indent normalization
+│   ├── DeleteFileTool.gd         # delete_file (files only, not dirs)
+│   │
+│   ├── ListDirectoryTool.gd      # list_directory
+│   ├── SearchTextTool.gd         # search_text (skips generated + binary)
+│   ├── FindFilesTool.gd          # find_files (skip lists; code-first sort)
+│   ├── FindSymbolTool.gd         # find_symbol (declarations + autoloads)
+│   ├── FindReferencesTool.gd     # find_references (identifier usages)
+│   │
+│   ├── LaunchEditorTool.gd       # launch_editor
+│   ├── LaunchProjectTool.gd      # launch_project
+│   ├── LaunchHeadlessTool.gd     # launch_headless
+│   ├── CheckScriptTool.gd        # check_script (structured errors + hints)
+│   ├── CheckProjectTool.gd       # check_project (whole tree)
+│   │
+│   ├── RevertLastChangeTool.gd   # revert_last_change
+│   ├── WritePlanTool.gd          # write_plan
+│   ├── UpdatePlanTool.gd         # update_plan
+│   ├── PlanStore.gd              # backing store
+│   │
+│   └── CheckpointManager.gd      # snapshot/commit/discard/revert;
+│                                  #   NOT a Tool subclass — naming smell
+│
+├── Debug/
+│   ├── DebugEvent.gd             # { severity, source, file, line, column,
+│   │                              #   message, raw } data holder
+│   └── ErrorParser.gd            # scans Godot stdout/stderr → Array[DebugEvent]
+│
+├── Permissions/
+│   └── PermissionManager.gd      # ALLOW/ASK/BLOCK per permission string
+│
+├── Project/
+│   ├── ProjectInfo.gd
+│   ├── ProjectManager.gd
+│   └── ProjectScanner.gd         # source-file-only listing (whitelist)
+│                                  #   injected as fixed leading system message
+│
+├── Context/
+│   ├── ContextManager.gd         # THREE fixed leading system messages:
+│   │                              #   1. system_prompt (MainWindow)
+│   │                              #   2. project_instructions (AGENT.md)
+│   │                              #   3. project_files_summary (ProjectScanner)
+│   └── TokenEstimator.gd         # ~4 chars/token rough estimate
+│
+└── UI/
+	├── AppSettings.gd            # AUTOLOAD
+	├── ThemeManager.gd           # AUTOLOAD
+	├── MainWindow.gd              # controller; system prompt assembly
+	├── ChatMessage.gd
+	├── ChatPanel.gd
+	├── AgentStatusIndicator.gd
+	├── ProjectPanel.gd
+	├── ActivityPanel.gd
+	├── StatusBar.gd
+	├── DiffDialog.gd
+	└── SettingsDialog.gd
+
+=======================================================================
+TOKEN ECONOMICS — WHERE THE BUDGET ACTUALLY GOES
+=======================================================================
+
+This is now the most important section of the doc. A real run from the
+chess project (6 API calls, one-line change) costs roughly:
+
+    FIXED PREFIX (sent on every call):
+	  System prompt (cheat sheet + act-don't-ask + tool usage)   ~600 tok
+	  AGENT.md                                                    ~330 tok
+	  Project file list                                           ~150 tok
+	  Tool schemas (19 tools)                                   ~2,400 tok
+	  ────────────────────────────────────────────────────────
+	  Total fixed                                               ~3,500 tok
+
+	CONVERSATION (grows each turn):
+	  User task + tool results + nudges                          ~4,000 tok
+
+	PER-TASK TOTAL (6 calls):
+	  6 × 3,500 + 4,000                                        ~25,000 tok
+
+	Of which ~21,000 tokens are the fixed prefix repeated on every
+	single API call. The one-line edit itself is buried in the noise.
+
+Three levers, ordered by impact:
+
+1. TOOL SCHEMAS (~2,400 tok) — biggest single win
+   The 19 tool `description` strings are written for a reader who
+   needs to know the difference between check_script and launch_headless.
+   A 120B cloud model does not. Analysis of one schema (check_script):
+   current description ~480 chars; a competent model needs ~135.
+   Estimated reduction: 2,400 → 900–1,100 tokens (−55%).
+   Applied per-call: −1,300 tok. Per typical task: −8,000 tok.
+
+2. SMALL-MODEL HAND-HOLDING (~500 tok) — gated by tier
+   The Godot syntax cheat sheet, the diagnostic-task priming, the
+   "act don't ask" paragraph, and the eventual syntax hints all exist
+   for 8B models. A cloud model reads past all of it. That's ~500
+   tokens per call that mean nothing to gpt-oss-120b.
+   Applied per-call: −500 tok. Per typical task: −3,000 tok.
+
+3. UNUSED TOOL REGISTRATION — user-controlled
+   launch_editor and launch_project are almost never called by a
+   coding agent. write_plan/update_plan are useful for some users,
+   dead weight for others. Each schema is ~200–400 tokens.
+   If three tools are dropped from registration: −800 tok per call.
+
+Combined effect on the same 6-call task:
+
+    Now:                ~25,000 tok
+    After levers 1+2:   ~13,000 tok   (−48%)
+    After levers 1+2+3: ~11,000 tok   (−56%)
+
+That roughly doubles the tasks-per-day on a fixed quota.
+
+=======================================================================
+WHAT WORKS (verified, not just stubbed)
+=======================================================================
+
+Agent core
+- AgentLoop state machine; conditional read-only repeat guard;
+  STATE_CHANGE_TOOL_NAMES (revert invalidates call history);
+  PATH_DEFAULT_RES_TOOLS normalization; cancel-safe; Gemini 3.x
+  thought_signature round-trip.
+- Thrash detection (6+ same-tool calls with no write).
+
+Harness nudges (small/local model support — CANDIDATES FOR TIER GATING)
+- GDScript syntax cheat sheet in system prompt
+- "Act, don't ask" paragraph in system prompt
+- Diagnostic-task priming (check_project first on short error tasks)
+- INVALID_ARGUMENT retry nudge (per-turn consolidated)
+- Post-check-error nudge (fires on text-only after check failure)
+- Wrong-line detection (edit range vs. error line)
+- Auto-verify after writes (check_script, capped 8/task)
+- File-not-found inline listing (re-surfaces project file list when
+  the model guesses a path that doesn't exist)
+- Symbol-guess spiral nudge (3+ find_symbol/find_references without a
+  read → "these tools only match identifiers, not literals")
+- No-read progress nudge (4+ tool calls without a successful read_file
+  → "you cannot edit code you have not read")
+- 2-stage gave-up escalation (stage 1: "you haven't written anything";
+  stage 2: names files, requires a read before further action)
+
+Error-specific hints (GodotTool._hint_for_message)
+- `Unexpected "/"` → "comments use #"
+- space-vs-tab indentation mismatch → direction-aware fix
+- `Unexpected "Indent"` in class body → "declarations start at column 0"
+- `Identifier not found` / `not declared` → check spelling; find_symbol
+- missing `:` / `(` / `)` / indented block; standalone expression;
+  nonexistent function; invalid call; invalid get/set index; null instance
+
+Indent normalization on write
+- EditFileTool and EditFileLinesTool normalize leading whitespace of
+  new content to the file's existing tabs-or-spaces convention.
+
+Tools
+- Full file set, full search set (find_symbol, find_references),
+  full process set, check_script/check_project with structured
+  DebugEvent parsing and autoload-FP filtering.
+- write_file catastrophic-shrink guard (refuses to replace ≥1KB file
+  with <20% of its size).
+- search_text / find_files skip generated files AND binary assets.
+
+Context management
+- ContextManager.build() compacts when over budget.
+- THREE fixed leading system messages survive compaction:
+  system_prompt, project_instructions, project_files_summary.
+
+Networking
+- 429 backoff, daily-quota fast-fail, configurable timeout,
+  distinct failure messages, Cancel button.
+
+UI
+- Everything built in code. Full dark/light theming. Settings dialog
+  does not pop up on launch. Chat has Copy All + per-message Copy.
+  ProjectPanel hides generated files. DiffDialog with per-entry
+  revert. Activity logs full project file list.
+
+Models tested (informal, not scientific)
+- Granite 4.1 8B (Ollama) — original default. Struggled with
+  multi-step tool use; frequently wrote tool calls as text.
+- Qwen 2.5 Coder 14B (Ollama) — better syntax; still guesses at
+  file paths rather than reading. Does not exploit AGENT.md pointers.
+- Qwen 3 14B (Ollama, queued) — untested as of this doc.
+- gpt-oss-120b (cloud) — completed a real one-line edit correctly
+  on the first working attempt.
+
+=======================================================================
+FUTURE PLAN — NEXT STEPS, IN ORDER
+=======================================================================
+
+NEXT — Tool schema trimming  [highest leverage for token cost]
+	Rewrite every `description` field in the 19 tool `_init()` methods
+	targeting 40–60% length reduction with no loss of meaning for a
+	competent model. Remove:
+	  - CLI-implementation details ("uses godot --headless --check-only")
+	  - tool-comparison prose ("prefer this before launch_headless")
+	  - explanations of behavior the tool itself reports in its result
+		(e.g. autoload FP filtering — the result already says "OK, no
+		parse errors, autoload references filtered as FPs")
+	  - restatements of what the arguments already say
+	Keep:
+	  - one-line purpose
+	  - the "when to use this vs. the alternative" signal (a short one)
+	  - any behavior the model cannot infer (e.g. edit_file_lines's
+        tolerance for whitespace mismatch)
+    Estimated total reduction: ~1,400 tokens per call across the whole
+    schema set. Purely mechanical; no behavior change for any model.
+
+    Deliverable: all 19 tool files rewritten.
+
+NEXT+NEXT — Per-model profile layer  [gates hand-holding]
+    Consolidate the small-model tuning constants into a ModelProfile
+    gated on a tier (TINY / SMALL / STANDARD / POWERFUL), with a
+    SettingsDialog dropdown (Auto / TINY / SMALL / STANDARD / POWERFUL)
+    and an Auto heuristic that regex-matches the model name.
+
+    Knobs:
+      max_tool_result_chars: int
+      large_file_line_threshold: int
+      inject_syntax_cheatsheet: bool
+      inject_act_dont_ask: bool
+      inject_diagnostic_priming: bool
+      append_syntax_hints: bool
+      auto_verify_default: bool
+      max_synthetic_recoveries: int
+      max_auto_verify_per_task: int
+      enable_gave_up_escalation: bool
+      enable_no_read_nudge: bool
+      enable_symbol_guess_nudge: bool
+      extra_system_hint: String
+
+    STANDARD (cloud-safe defaults):
+      inject_* : false (all four)
+      append_syntax_hints : false
+      enable_*_nudge : false
+      max_tool_result_chars : 32_000
+      large_file_line_threshold : 500
+      max_synthetic_recoveries : 0
+      max_auto_verify_per_task : 0
+
+    SMALL (7-8B local):
+      inject_syntax_cheatsheet : true
+      inject_act_dont_ask : true
+      inject_diagnostic_priming : true
+      append_syntax_hints : true
+      enable_gave_up_escalation : true
+      enable_no_read_nudge : true
+      enable_symbol_guess_nudge : true
+      max_tool_result_chars : 8_000
+      large_file_line_threshold : 200
+      max_synthetic_recoveries : 4
+      max_auto_verify_per_task : 8
+
+    TINY: same as SMALL with 4k cap and more aggressive priming.
+
+    Estimated per-call saving on STANDARD: ~500 tokens. Per typical
+    task: ~3,000 tokens.
+
+    Deliverable: ModelProfile.gd + AppSettings.model_tier +
+    SettingsDialog dropdown + migration of every constant in
+    AgentLoop, ReadFileTool, GodotTool, MainWindow.
+
+Optional — Tool registration pruning in Settings  [user-controlled]
+    Checkboxes in SettingsDialog for tools that are unused by default:
+      - launch_editor / launch_project (rarely needed by a coding agent)
+      - write_plan / update_plan (useful only if the user watches the
+        plan panel)
+    Each removed tool saves ~200–400 tokens per call. All four would
+	save ~1,000 tokens per call for users who don't want them.
+
+	Deliverable: registration filter in MainWindow._setup_agent() +
+	AppSettings.disabled_tools: Array[String] + SettingsDialog section.
+
+Then — Session persistence
+	Serialize { conversation, plan_store.steps, last_project, checkpoint
+	stack summary } to user://sessions/<id>/session.json after every
+	turn. Never write api_key into a session file.
+
+Then — Explicit task-outcome reporting
+	Add BLOCKED and GAVE_UP states to AgentState. When the model gives
+	up without fixing, the UI must not show COMPLETED.
+
+Then — Scene inspection tools
+	inspect_scene(path), inspect_node(path), find_node(name),
+	get_node_property(path, property) — parse .tscn text directly.
+
+Then — AGENT.md draft generator
+	"Suggest AGENT.md" menu item that scans the project and writes
+	res://AGENT.md.draft with autoloads, class hierarchy, signal list
+	pre-filled, plus comment skeletons for the human-written parts.
+
+Then — Skills, Subagents
+	Keyword-triggered instruction snippets; bounded read-only research
+	mode.
+
+Later / not scheduled
+	Runtime debug bridge, editor bridge, MCP integration, git
+	integration (user does not use git).
+
+=======================================================================
+DESIGN DECISIONS ALREADY MADE
+=======================================================================
+
+- LLMProvider is a stub; LLMClient talks OpenAI chat-completions
+  directly. Every provider in use speaks it.
+- Tool calls stored in OpenAI shape in the conversation.
+- Settings file is plain text including the API key.
+- File tree in ProjectPanel is lazy-loaded.
+- No autoloads except AppSettings and ThemeManager.
+- check_script/check_project autoload-FP filtering is two-tiered.
+- Structured DebugEvent output is added *under* the existing raw-text
+  error gate, not replacing it.
+- Read-only tools conditionally exempt from repeat guard.
+- STATE_CHANGE_TOOL_NAMES includes revert_last_change; revert clears
+  the entire call history (unknown path).
+- PATH_DEFAULT_RES_TOOLS normalizes {} and {"path":"res://"} to the
+  same signature.
+- write_file catastrophic-shrink guard: prevention over recovery.
+  Checkpoints exist, but the user shouldn't have to notice-and-revert.
+- Post-check-error nudge's pending flag is NOT reset on read-only calls.
+- Syntax hints derive from structured DebugEvent records, not raw stdout.
+- Indent normalization: 4 spaces = 1 tab, rounds up.
+- AGENT.md loaded eagerly at project-open, cleared on close.
+- ProjectScanner source-file-only (whitelist of code/config/doc extensions).
+- DiffDialog reverts LIFO (reverting Nth-newest undoes N+1 changes).
+- CheckpointManager is a non-Tool class living in Tools/. Naming smell;
+  would move to a real Session/ folder in a cleanup pass.
+- Small-model support accumulated across many rounds is now the
+  dominant token cost on cloud models. Consolidating it into the
+  per-model profile is the second-highest-priority item after tool
+  schema trimming.
+- Tool schema length is the biggest single fixed cost per API call.
+  Descriptions must be written for a competent model: purpose, when
+  to use vs. the alternative, argument semantics. Everything else
+  (CLI details, internal behavior explanations, comparison prose) is
+  noise that a large cloud model pays for on every call.
+
+=======================================================================
+KNOWN LIMITATIONS (observed, not yet fixed)
+=======================================================================
+
+- Transport errors are still reported as bare numeric codes in
+  LLMClient._on_request_completed. A drafted fix maps each
+  HTTPRequest.Result code to a diagnostic message and adds an
+  endpoint-specific hint for local servers (Ollama / LM Studio).
+
+- The model still occasionally chooses write_file for a large file it
+  hasn't read end-to-end; the shrink guard prevents catastrophe, but
+  the attempt recurs. Next escalation (if needed): refuse write_file
+  on any file not fully read this task.
+
+- The model guesses nonexistent paths even with the file list in
+  context. The file-not-found nudge re-surfaces the list inline, which
+  reduces the recurrence rate but does not eliminate it. Fundamental
+  limit of small/local models.
+
+- Fixing one error can reveal several more (Godot stops at the first
+  parse error). A model that sees 1 → 3 errors after an edit may
+  panic. Drafted fix: track previous error count and inject a
+  "cascade, not regression" note.
+
+- AGENT.md pointers are advisory. A small model may read past an
+  explicit "if the user asks about X, look in file Y" line. Not
+  fixable by the harness; fixable by using a model that actually
+  reads its context.
+
+=======================================================================
+RULES THAT STILL APPLY
+=======================================================================
+
+1. The LLM is the reasoner; the Godot app is the harness. No
+   task-specific logic in AgentLoop.
+2. The LLM never gets unrestricted OS access. Every tool declares
+   required_permission; PermissionManager decides.
+3. Sandbox enforcement is code (ProjectPathTool.resolve_path), never
+   just prompting.
+4. No fake success. check_script/check_project/launch_headless scan
+   output text for error markers — never trust exit code alone.
+   (Extended: don't mark COMPLETED when the model gave up.)
+5. Bounded tool output. Search/find results capped; file reads support
+   line ranges; AgentLoop truncates tool results before conversation.
+6. Context compaction preserves the user's original goal and active
+   constraints above all else — never drop the tail, never orphan a
+   tool_call/tool_result pair.
+7. Clean-room implementation.
+8. Tabs for indentation, explicit types, avoid Variant round-trips.
+9. UI is built in code — no .tscn editing beyond main.tscn's root node.
+10. Generated files never reach the model. .godot/, .git/, .import,
+	.uid, __pycache__ filtered everywhere.
+11. Harness nudges fire on specific failure shapes, never
+	prophylactically. A model that already behaves correctly must
+	never see one.
+12. Hints derive from structured data (DebugEvent records), not raw
+	stdout. Parser miss → no hint, not a wrong hint.
+13. Every small-model support addition is gated behind the per-model
+	profile. A cloud model must never see hand-holding intended for
+	an 8B.
+14. Fixed leading system messages — system prompt, project
+	instructions, project file list — survive compaction.
+15. Prevention over recovery when the recovery costs the user's time.
+	write_file's shrink guard exists because checkpoints can undo a
+	catastrophic write, but the user shouldn't have to notice-and-revert.
+16. Token budget is a first-class design constraint. Every fixed
+    string sent on every API call (tool descriptions, system prompt
+    sections, injected hints) must justify its length for the
+    *smallest tier of model that will see it*. If a hint exists for
+    TINY/SMALL only, it must be gated behind the profile so STANDARD+
+	models don't pay for it.

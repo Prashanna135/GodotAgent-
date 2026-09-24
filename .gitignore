@@ -1,0 +1,7 @@
+.godot/
+key.txt
+export/
+export_presets.cfg
+*.tmp
+*~
+.agent_scenarios/
