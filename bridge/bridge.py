@@ -2,14 +2,15 @@
 DeepSeek Web Chat Bridge
 ========================
 
-Drives a real, logged-in browser session against chat.deepseek.com via
-Playwright, and exposes an OpenAI-compatible `/v1/chat/completions`
-endpoint on localhost. This lets GodotAgent's existing LLMClient.gd talk
-to it with ZERO Godot-side code changes — LLMClient already builds an
-OpenAI-shaped request body and parses an OpenAI-shaped response; this
-bridge just needs to speak that same shape back.
+Exposes DeepSeek's free web chat (chat.deepseek.com) as an
+OpenAI-compatible `/v1/chat/completions` endpoint on localhost, so that
+GodotAgent — or any other client that speaks the OpenAI chat API — can
+use it without modification. DeepSeek's web frontend has no public API
+and no native function-calling; this bridge drives a real Chromium
+window with Playwright, types the prompt into the actual chat input,
+and returns the model's reply in OpenAI response shape.
 
-Architecture (see handoff doc, Section 4 "Strategy A"):
+Architecture:
     Godot LLMClient.gd  --HTTP-->  this bridge (FastAPI)
                                         |
                                         v
@@ -19,18 +20,17 @@ Architecture (see handoff doc, Section 4 "Strategy A"):
                                         v
                                  chat.deepseek.com
                                  (page's own JS solves the
-                                 PoW challenge, handles auth,
-                                 threads the conversation)
+                                 proof-of-work challenge, handles
+                                 auth, threads the conversation)
 
 We do NOT reconstruct DeepSeek's internal request shape or solve its
 proof-of-work challenge ourselves — we type into the real chat input and
 press Enter, exactly like a human, and just listen to the network
-response that the page's own JS triggers. This is the only strategy the
-handoff doc did not reject.
+response the page's own JS triggers.
 
 No tool-calling protocol is implemented on the Python side. DeepSeek's
 plain-text reply is returned verbatim as `choices[0].message.content`;
-AgentLoop.gd's synthetic-recovery path (`_extract_recovered_calls`)
+GodotAgent's synthetic-recovery path (`AgentLoop._extract_recovered_calls`)
 parses the tagged format defined below out of that text and executes the
 calls as real tool calls. Set the Godot Settings dialog's "Model tier"
 to *Web Chat* (or leave it on Auto and name the model anything containing
@@ -44,9 +44,9 @@ That is the ONLY format this bridge asks for. It is deliberately not
 bare-JSON: a `TOOL:` line is not a token DeepSeek's web chat would ever
 emit as incidental prose, so the protocol survives the model's strong
 prose instinct in a way that "please output one bare JSON object and
-nothing else" does not. AgentLoop also keeps a legacy bare-JSON parser
-as a fallback, so a model that reverts gets recovered anyway — but the
-instruction here is tagged-only.
+nothing else" does not. The Godot side also keeps a legacy bare-JSON
+parser as a fallback, so a model that reverts gets recovered anyway — but
+the instruction here is tagged-only.
 
 RATE LIMITING
 -------------
@@ -58,9 +58,10 @@ immediately without mitigation. This bridge:
   1. Enforces a minimum gap between consecutive sends (MIN_SEND_GAP_SECS).
   2. Detects the rate-limit response (HTTP 429, or the error text in the
      body), waits a cooldown, and retries the SAME prompt internally
-     without telling Godot — up to RATE_LIMIT_MAX_RETRIES times, with
-     exponential backoff.
-  3. If internal retries are exhausted, returns a real HTTP 429 to Godot.
+     without telling the client — up to RATE_LIMIT_MAX_RETRIES times,
+     with exponential backoff.
+  3. If internal retries are exhausted, returns a real HTTP 429 to the
+     client.
 
 On the WEB_CHAT tier Godot's own 429 backoff is disabled
 (ModelProfile.retry_429_locally = false -> LLMClient.retry_on_429 =
@@ -89,16 +90,16 @@ log described below).
 
 CONTROL CHARACTERS / MALFORMED JSON
 -----------------------------------
-Godot's `JSON.stringify` does not escape every C0 control character inside
-string values. When a tool result contains raw subprocess output — most
-notably `launch_headless --editor --quit`, whose output is full of ANSI
-color escapes (ESC = 0x1B) — a raw 0x1B byte lands inside the request body.
-Python's `json.loads` runs in strict mode by default and rejects raw
-control characters with `JSONDecodeError: Invalid control character at:`.
-That used to crash the entire request with an unhandled 500, and because
-the offending tool result is already in the conversation, every subsequent
-request carried the same byte and crashed the same way — the session died
-permanently.
+Godot's `JSON.stringify` does not escape every C0 control character
+inside string values. When a tool result contains raw subprocess output —
+most notably `launch_headless --editor --quit`, whose output is full of
+ANSI color escapes (ESC = 0x1B) — a raw 0x1B byte lands inside the
+request body. Python's `json.loads` runs in strict mode by default and
+rejects raw control characters with `JSONDecodeError: Invalid control
+character at:`. That used to crash the entire request with an unhandled
+500, and because the offending tool result is already in the
+conversation, every subsequent request carried the same byte and crashed
+the same way — the session died permanently.
 
 The fix has two halves:
 
@@ -106,14 +107,14 @@ The fix has two halves:
      retries with `json.loads(..., strict=False)` when the strict parse
      fails, and returns a clean HTTP 400 if even that fails. No more
      unhandled 500s.
-  2. `_sanitize_messages` strips ANSI escapes and any remaining C0 control
-     characters (except tab/newline/CR) from every incoming message's
-     content before it's rendered into a prompt. So the model sees clean
-     text, and the same bytes can't poison future requests via
-     `_known_messages`.
+  2. `_sanitize_messages` strips ANSI escapes and any remaining C0
+     control characters (except tab/newline/CR) from every incoming
+     message's content before it's rendered into a prompt. So the model
+     sees clean text, and the same bytes can't poison future requests
+     via `_known_messages`.
 
-Both are belt-and-braces. The Godot side should also strip ANSI in
-AgentLoop._truncate_tool_result (see the Godot-side handoff), but the
+Both are belt-and-braces. A well-behaved client can also strip ANSI
+before sending (Godot's AgentLoop._truncate_tool_result does), but the
 bridge defends itself independently so a stale session resumed from
 before that fix doesn't re-crash on load.
 
@@ -125,18 +126,19 @@ Every DeepSeek send is logged:
   bridge_logs/sse/<id>.sse     full prompt + raw SSE + parsed reply
 
 index.jsonl is the greppable summary; the sse/ files are for when you
-need to see exactly what DeepSeek sent back. Both are written by default
-— set SAVE_RAW_SSE = False if you don't want the full-body files.
+need to see exactly what DeepSeek sent back. Both are written by
+default — set SAVE_RAW_SSE = False if you don't want the full-body
+files.
 
 >>> SELECTORS BELOW ARE BEST-EFFORT PLACEHOLDERS. <<<
-I (the assistant that wrote this file) cannot load chat.deepseek.com to
-confirm its current DOM. Before first real use, run:
+DeepSeek occasionally changes the DOM of its chat UI. If the bridge
+stops sending messages after a DeepSeek frontend update, run:
 
     playwright codegen https://chat.deepseek.com
 
 and update SEL_CHAT_INPUT / SEL_NEW_CHAT_BUTTON below to match what
 codegen records when you click the message box and the "New chat"
-button. See README.md for the full walkthrough.
+button.
 """
 
 from __future__ import annotations
@@ -156,47 +158,60 @@ from fastapi.responses import JSONResponse
 from playwright.async_api import async_playwright, Page, BrowserContext, TimeoutError as PWTimeout
 
 # --------------------------------------------------------------------------
-# Config — edit these to taste.
+# Config — edit these to taste, or override via environment variables.
 # --------------------------------------------------------------------------
 
 DEEPSEEK_URL = "https://chat.deepseek.com/"
-USER_DATA_DIR = r"C:\Users\magar\deepseek_chrome_profile"       # persistent login lives here
+
+# Where the persistent Chromium profile lives. This is the folder that
+# keeps your DeepSeek login across bridge restarts — it holds cookies and
+# localStorage, so treat it like a password: don't commit it, don't share
+# it. Defaults to a `deepseek_profile/` folder next to this script, which
+# is already in .gitignore. Override with the DEEPSEEK_PROFILE_DIR env
+# var if you want it somewhere else (e.g. an SSD path or a shared
+# profile across machines).
+USER_DATA_DIR = os.environ.get(
+    "DEEPSEEK_PROFILE_DIR",
+    os.path.join(os.path.dirname(os.path.abspath(__file__)), "deepseek_profile"),
+)
+
 HOST = "127.0.0.1"
 PORT = 5000
 
 # Milliseconds to wait for a chat/completion network response. DeepThink /
 # web-search modes can take a long time — keep this generous. This should
-# be <= the timeout you set in Godot's Settings dialog (or set Godot's to
-# 0 / unlimited and let this be the real ceiling).
+# be <= the timeout you set in the client's Settings dialog (or set the
+# client's timeout to 0 / unlimited and let this be the real ceiling).
 RESPONSE_TIMEOUT_MS = 180_000
 
 HEADLESS = False   # keep a real visible window so you can log in by hand
 
-# Google's OAuth blocks sign-in from CDP-driven (automation-controlled)
-# browsers outright — "This browser or app may not be secure" — regardless
-# of which Chromium build runs it. If your DeepSeek account only has
-# "Log in with Google" and no email/password option, the workaround is to
-# reuse a real Chrome profile that's ALREADY logged into DeepSeek from
-# normal, non-automated browsing, instead of authenticating inside this
-# automated one at all.
+# Which browser binary Playwright launches.
 #
-# To do that:
-#   1. Fully quit Chrome (it locks its profile directory while running).
-#   2. Set BROWSER_CHANNEL = "chrome" below.
-#   3. Set USER_DATA_DIR to your real Chrome "User Data" folder, e.g.:
-#        Windows: C:/Users/<you>/AppData/Local/Google/Chrome/User Data
+#   None    -> Playwright's bundled Chromium. Works out of the box after
+#              `playwright install chromium`. Use this by default.
+#   "chrome" -> Your system Chrome installation. Needed only if your
+#              DeepSeek account was created via "Log in with Google" and
+#              you hit "This browser or app may not be secure" during
+#              login — Google blocks Google-OAuth sign-in from automated
+#              browsers.
+#
+# The Google-OAuth workaround (only if you need it):
+#   1. Fully quit Chrome — it locks its profile directory while running.
+#   2. Set BROWSER_CHANNEL = "chrome" (or the DEEPSEEK_BROWSER_CHANNEL
+#      env var to "chrome").
+#   3. Point DEEPSEEK_PROFILE_DIR at your real Chrome "User Data" folder
+#      so the bridge reuses your existing session instead of logging in:
+#        Windows: C:\Users\<you>\AppData\Local\Google\Chrome\User Data
 #        macOS:   ~/Library/Application Support/Google/Chrome
 #        Linux:   ~/.config/google-chrome
-#      (this loads whichever profile Chrome treats as default — usually
-#      the one named "Default" inside that folder — bringing its cookies
-#      and localStorage with it, so DeepSeek just sees an already-logged-in
-#      session and never runs the Google flow at all)
-#   4. Leave your normal Chrome closed while the bridge is running.
+#   4. Keep Chrome closed while the bridge is running.
 #
-# Leave BROWSER_CHANNEL = None (and USER_DATA_DIR pointing at the small
-# dedicated ./deepseek_profile folder) for email/password logins, or once
-# you've logged in successfully at least once in the automated window.
-BROWSER_CHANNEL: str | None = "chrome"   # set to "chrome" for the workaround above
+# With an email/password DeepSeek account (no Google involved), leave
+# this as None and the default USER_DATA_DIR — the bridge launches its
+# own Chromium, you log in once inside that window, and the login
+# persists.
+BROWSER_CHANNEL: str | None = os.environ.get("DEEPSEEK_BROWSER_CHANNEL", None)
 
 # --- rate limiting -------------------------------------------------------
 # Minimum wall-clock seconds between consecutive sends to DeepSeek. Counted
@@ -215,11 +230,11 @@ RATE_LIMIT_INITIAL_COOLDOWN_SECS = 30.0
 RATE_LIMIT_MAX_COOLDOWN_SECS = 240.0
 
 # How many times to retry a rate-limited send INSIDE the bridge before
-# giving up and returning HTTP 429 to Godot. On the WEB_CHAT tier that
-# 429 is terminal (LLMClient.retry_on_429 is false — see the module
-# docstring), so this is the only retry schedule that runs. Each retry
-# adds delay to the request's total wall-clock time — keep Godot's
-# timeout high enough to absorb this.
+# giving up and returning HTTP 429 to the client. On the WEB_CHAT tier
+# that 429 is terminal (the client's own retry is disabled — see the
+# module docstring), so this is the only retry schedule that runs. Each
+# retry adds delay to the request's total wall-clock time — keep the
+# client's timeout high enough to absorb this.
 RATE_LIMIT_MAX_RETRIES = 3
 
 # Substrings that identify a rate-limit response when it arrives as HTTP
@@ -246,10 +261,10 @@ RATE_LIMIT_MARKERS = [
 MAX_PROMPT_CHARS = 80_000
 
 # Hard ceiling on any single rendered TOOL result before it enters the
-# prompt. Godot already truncates tool results (AgentLoop._truncate_tool_
-# result), but session resumption loads old conversations where the cap
-# wasn't applied. 20_000 chars is a generous read_file output; anything
-# larger is almost certainly being truncated by the tool itself anyway.
+# prompt. The client already truncates tool results, but session
+# resumption loads old conversations where the cap wasn't applied. 20_000
+# chars is a generous read_file output; anything larger is almost
+# certainly being truncated by the tool itself anyway.
 TOOL_RESULT_BRIDGE_CAP = 20_000
 
 # --- request logging -----------------------------------------------------
@@ -267,23 +282,23 @@ SEL_NEW_CHAT_BUTTON = "text=/new chat/i"
 # Control-character / malformed-JSON defence
 # --------------------------------------------------------------------------
 #
-# Godot's JSON.stringify leaves raw C0 control characters (0x00–0x1F) inside
-# string values unescaped. A tool result that captured subprocess output —
-# most notably `launch_headless --editor --quit`, whose progress-bar output
-# is full of ANSI escapes prefixed by raw ESC (0x1B) — therefore puts a raw
-# control byte into the request body. Python's json.loads, strict by
-# default, rejects those with JSONDecodeError; the bridge used to 500 on
-# every subsequent request because the offending tool result was already in
-# the conversation.
+# Godot's JSON.stringify leaves raw C0 control characters (0x00–0x1F)
+# inside string values unescaped. A tool result that captured subprocess
+# output — most notably `launch_headless --editor --quit`, whose
+# progress-bar output is full of ANSI escapes prefixed by raw ESC (0x1B) —
+# therefore puts a raw control byte into the request body. Python's
+# json.loads, strict by default, rejects those with JSONDecodeError; the
+# bridge used to 500 on every subsequent request because the offending
+# tool result was already in the conversation.
 #
 # Two layers of defence below:
 #   1. _parse_request_body: tolerate the control characters rather than
 #      crashing (strict=False fallback), and return a clean 400 if even
 #      that fails.
 #   2. _sanitize_messages: strip ANSI and any remaining C0 control
-#      characters from every incoming message's content, so the model sees
-#      clean text and the same bytes can't poison future requests via
-#      _known_messages.
+#      characters from every incoming message's content, so the model
+#      sees clean text and the same bytes can't poison future requests
+#      via _known_messages.
 
 # ANSI/VT100 CSI sequence: ESC '[' followed by parameter bytes (digits and
 # ';') then a final byte (letter). Matches the color and progress-bar
@@ -319,7 +334,7 @@ def _sanitize_messages(messages: list) -> list:
 	"""Applies _sanitize_content to every message's `content` field.
 
 	Does not touch tool_calls arguments, tool_call_id, name — those are
-	structured fields Godot already escapes correctly. Only free-text
+	structured fields the client already escapes correctly. Only free-text
 	content, which is where subprocess output ends up, is sanitized.
 	"""
 	out: list = []
@@ -349,8 +364,9 @@ async def _parse_request_body(request: Request) -> tuple[dict[str, Any] | None, 
 		return json.loads(raw), None
 	except json.JSONDecodeError as strict_exc:
 		# Common case: raw control characters inside a string value that
-		# Godot's JSON.stringify didn't escape. strict=False accepts them.
-		# The bytes themselves are cleaned up later by _sanitize_messages.
+		# the client's JSON.stringify didn't escape. strict=False accepts
+		# them. The bytes themselves are cleaned up later by
+		# _sanitize_messages.
 		try:
 			body = json.loads(raw, strict=False)
 			print(
@@ -381,15 +397,15 @@ async def _parse_request_body(request: Request) -> tuple[dict[str, Any] | None, 
 class RateLimitedError(Exception):
 	"""Raised internally when a send could not be completed even after the
 	bridge's own cooldowns. Callers translate this into an HTTP 429 so the
-	Godot side can see a real OpenAI-shaped error — but on the WEB_CHAT
-	tier that 429 is terminal: LLMClient.retry_on_429 is false for this
-	provider, so Godot will NOT schedule its own backoff on top of ours."""
+	client side can see a real OpenAI-shaped error — but on the WEB_CHAT
+	tier that 429 is terminal: the client's own retry is disabled for this
+	provider, so it will NOT schedule its own backoff on top of ours."""
 	def __init__(self, message: str, retries: int) -> None:
 		super().__init__(message)
 		self.retries = retries
 
 # --------------------------------------------------------------------------
-# SSE parsing — see handoff doc §3.2 for the exact shapes this decodes.
+# SSE parsing
 # --------------------------------------------------------------------------
 
 def _parse_sse_blocks(raw: str) -> list[tuple[str | None, str]]:
@@ -528,14 +544,14 @@ def _looks_rate_limited(text: str) -> bool:
 # the NEW turns since the last call are typed into the already-open
 # conversation, since the DeepSeek server threads history itself. If the
 # incoming history no longer has our last-known state as a prefix (e.g.
-# ContextManager compacted it), we start a fresh chat and resend everything
+# the client compacted it), we start a fresh chat and resend everything
 # we still have — subject to MAX_PROMPT_CHARS, see build_prompt_under_budget.
 # --------------------------------------------------------------------------
 
-# Tagged protocol — see AgentLoop._extract_tagged_calls and
-# MainWindow.SYSTEM_PROMPT_WEB_CHAT_PROTOCOL. Kept in sync with the latter
-# on purpose: on a full resend both this header and the system prompt are
-# in the conversation at once, so they must describe the same format. The
+# Tagged protocol — kept in sync with the client-side system prompt section
+# (GodotAgent's MainWindow.SYSTEM_PROMPT_WEB_CHAT_PROTOCOL). On a full
+# resend both this header and the client's system prompt are in the
+# conversation at once, so they must describe the same format. The
 # bridge's copy is slightly longer because it also has to introduce the
 # tool list it renders below, and it names the exact failure modes
 # (markdown fences, angle-bracket pseudo-tags) that the parser would
@@ -587,9 +603,9 @@ def _describe_tools(tools: list[dict]) -> str:
 
 def _cap_tool_result(content: str) -> str:
 	"""Head+tail truncation for any single tool result that exceeds
-	TOOL_RESULT_BRIDGE_CAP. Godot's AgentLoop already caps these before
-	they enter the conversation, but session resumption loads old data
-	that was saved before the cap existed, and it's cheap insurance."""
+	TOOL_RESULT_BRIDGE_CAP. The client already caps these before they
+	enter the conversation, but session resumption loads old data that
+	was saved before the cap existed, and it's cheap insurance."""
 	if len(content) <= TOOL_RESULT_BRIDGE_CAP:
 		return content
 	half = TOOL_RESULT_BRIDGE_CAP // 2
@@ -752,7 +768,10 @@ class DeepSeekSession:
 	async def start(self) -> None:
 		os.makedirs(os.path.join(BRIDGE_LOG_DIR, "sse"), exist_ok=True)
 		self._index_path = os.path.join(BRIDGE_LOG_DIR, "index.jsonl")
-		print(f"[bridge] logs → {BRIDGE_LOG_DIR}/")
+		print(f"[bridge] logs -> {BRIDGE_LOG_DIR}/")
+		print(f"[bridge] profile dir: {USER_DATA_DIR}")
+		if BROWSER_CHANNEL:
+			print(f"[bridge] browser channel: {BROWSER_CHANNEL}")
 
 		self._pw = await async_playwright().start()
 		launch_kwargs: dict[str, Any] = {
@@ -897,10 +916,10 @@ class DeepSeekSession:
 		signal. Returns the parsed reply text on success; raises
 		RateLimitedError if retries are exhausted.
 
-		On the WEB_CHAT tier this is the single retry authority — Godot's
-		own 429 backoff is disabled there (see module docstring), so a
-		RateLimitedError raised here becomes the user-visible outcome, not
-		the trigger for another layer of retries.
+		On the WEB_CHAT tier this is the single retry authority — the
+		client's own 429 backoff is disabled there (see module docstring),
+		so a RateLimitedError raised here becomes the user-visible
+		outcome, not the trigger for another layer of retries.
 
 		Every attempt — success or rate-limited — is written to the request
 		log via _log_request."""
@@ -975,11 +994,12 @@ class DeepSeekSession:
 					"window, log in, then retry the request."
 				)
 
-			# Compare only role+content, not the full dict — Godot's own
-			# conversation attaches tool_calls/tool_call_id/name to messages
-			# that this bridge never sees when it guesses the shape of what
-			# it just said, so an exact dict `==` here would mismatch on
-			# EVERY turn and force a needless new_chat() each time.
+			# Compare only role+content, not the full dict — the client's
+			# own conversation attaches tool_calls/tool_call_id/name to
+			# messages that this bridge never sees when it guesses the
+			# shape of what it just said, so an exact dict `==` here would
+			# mismatch on EVERY turn and force a needless new_chat() each
+			# time.
 			is_prefix = (
 				self._chat_open
 				and len(messages) >= len(self._known_messages)
@@ -1090,14 +1110,14 @@ async def chat_completions(request: Request):
 		# real 429 with an OpenAI-shaped error body.
 		#
 		# On the WEB_CHAT tier this 429 is terminal: ModelProfile sets
-		# retry_429_locally = false, MainWindow pushes that into
-		# LLMClient.retry_on_429, and Godot will NOT run its own
-		# 5s/15s/45s backoff on top of ours. That is deliberate — a second,
-		# shorter retry schedule from Godot would re-type the same prompt
-		# into the same DeepSeek thread at an interval DeepSeek has just
-		# told us is too fast, doubling the messages it has to throttle.
-		# Every other tier leaves LLMClient.retry_on_429 at its default
-		# (true), because those endpoints have no bridge in front of them.
+		# retry_429_locally = false, the client's config pushes that into
+		# retry_on_429, and the client will NOT run its own 5s/15s/45s
+		# backoff on top of ours. That is deliberate — a second, shorter
+		# retry schedule would re-type the same prompt into the same
+		# DeepSeek thread at an interval DeepSeek has just told us is too
+		# fast, doubling the messages it has to throttle. Every other tier
+		# leaves retry_on_429 at its default (true), because those
+		# endpoints have no bridge in front of them.
 		#
 		# X-Bridge-Status is diagnostic-only: it names the layer that gave
 		# up, so a proxy, a log analysis pass, or a future client can tell
